@@ -98,11 +98,7 @@ cd backend
 mvn clean install
 mvn spring-boot:run
 ```
-**Kết quả**
 
-```
-http://localhost:8080
-```
 ## 🌐 Chạy Frontend (ReactJS)
 **Mở Terminal và chạy lệnh**
 ```properties
