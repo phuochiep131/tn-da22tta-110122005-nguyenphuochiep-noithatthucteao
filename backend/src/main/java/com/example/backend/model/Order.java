@@ -43,6 +43,9 @@ public class Order {
     @Column(name = "total_amount", nullable = false)
     private BigDecimal totalAmount;
 
+    @Column(name = "shipping_fee")
+    private BigDecimal shippingFee;
+
     @Column(name = "is_order")
     private Boolean isOrder;
 

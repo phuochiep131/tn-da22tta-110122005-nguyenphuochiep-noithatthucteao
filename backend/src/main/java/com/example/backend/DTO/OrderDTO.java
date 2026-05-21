@@ -18,6 +18,7 @@ public class OrderDTO {
     private LocalDateTime updatedAt;
     private Integer couponId;
     private BigDecimal totalAmount;
+    private BigDecimal shippingFee;
     private Boolean isOrder;
     private List<String> oldOrderIds;
     private List<OrderDetailDTO> orderDetails;
@@ -36,6 +37,7 @@ public class OrderDTO {
         this.updatedAt = order.getUpdatedAt();
         this.couponId = order.getCouponId();
         this.totalAmount = order.getTotalAmount();
+        this.shippingFee = order.getShippingFee();
         this.isOrder = order.getIsOrder();
 
         if (order.getOrderDetails() != null) {

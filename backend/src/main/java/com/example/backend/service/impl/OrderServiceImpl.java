@@ -151,6 +151,7 @@ public class OrderServiceImpl implements OrderService {
         order.setShippingAddress(req.getShippingAddress());
         order.setCustomerNote(req.getCustomerNote());
         order.setTotalAmount(req.getTotalAmount());
+        order.setShippingFee(req.getShippingFee());
         order.setIsOrder(true); // Đây là đơn thật
         order.setCouponId(req.getCouponId());
 
@@ -196,6 +197,7 @@ public class OrderServiceImpl implements OrderService {
         newOrder.setShippingAddress(order.getShippingAddress());
         newOrder.setCustomerNote(order.getCustomerNote());
         newOrder.setTotalAmount(order.getTotalAmount());
+        newOrder.setShippingFee(order.getShippingFee());
         newOrder.setOrderStatus("Pending");
         newOrder.setOrderDate(LocalDateTime.now());
         newOrder.setIsOrder(true);

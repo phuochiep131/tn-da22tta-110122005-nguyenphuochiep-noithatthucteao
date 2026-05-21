@@ -519,13 +519,25 @@ export default function Purchase() {
             </div>
 
             {/* 4. Tổng tiền Footer */}
-            <div className="border-t pt-4 flex justify-between items-center">
-              <span className="text-gray-600 font-medium">
-                Tổng thành tiền:
-              </span>
-              <span className="text-2xl font-bold text-red-600">
-                {detailOrder.totalAmount.toLocaleString()} ₫
-              </span>
+            <div className="border-t pt-4 space-y-2">
+              {detailOrder.shippingFee != null && (
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-gray-500 flex items-center gap-1">
+                    <Truck size={14} /> Phí vận chuyển
+                  </span>
+                  <span className="text-gray-700 font-medium">
+                    {Number(detailOrder.shippingFee).toLocaleString()} ₫
+                  </span>
+                </div>
+              )}
+              <div className="flex justify-between items-center">
+                <span className="text-gray-600 font-medium">
+                  Tổng thành tiền:
+                </span>
+                <span className="text-2xl font-bold text-red-600">
+                  {detailOrder.totalAmount.toLocaleString()} ₫
+                </span>
+              </div>
             </div>
 
             <div className="mt-6 flex justify-end">

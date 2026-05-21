@@ -12,6 +12,7 @@ public class OrderReplaceRequest {
     private String customerNote;
     private Integer couponId;
     private BigDecimal totalAmount;
+    private BigDecimal shippingFee;
 
     private List<String> oldOrderIds;
     private List<OrderDetailCreateDTO> orderDetails;

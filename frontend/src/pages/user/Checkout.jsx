@@ -1,6 +1,6 @@
 import { useLocation, useNavigate } from "react-router-dom";
-import { useState, useEffect, useContext } from "react"; // [UPDATE] Thêm useContext
-import { message, Modal, Input, Divider, Button } from "antd";
+import { useState, useEffect, useContext, useMemo, useRef } from "react"; // [UPDATE] Thêm useContext
+import { message, Modal, Input, Divider, Button, Select } from "antd";
 import {
   MapPin,
   Edit,
@@ -20,6 +20,22 @@ import {
 import Cookies from "js-cookie";
 import { AuthContext } from "../../context/AuthContext"; // [UPDATE] Import AuthContext
 import api from "../../config/api";
+import {
+  calculateShippingFee,
+  extractGhnError,
+  getAvailableServices,
+  getDistricts,
+  getProvinces,
+  getWards,
+  isGhnRequestCanceled,
+} from "../../services/ghnService";
+
+const SHIPPING_DEBOUNCE_MS = 500;
+const DEFAULT_PACKAGE_SIZE = {
+  height: 20,
+  length: 20,
+  width: 20,
+};
 
 // --- HÀM KIỂM TRA HẠN SỬ DỤNG ---
 const isCouponExpired = (endDate) => {
@@ -58,7 +74,27 @@ export default function Checkout() {
     name: "",
     phone: "",
     address: "",
+    provinceId: null,
+    provinceName: "",
+    districtId: null,
+    districtName: "",
+    wardCode: "",
+    wardName: "",
   });
+
+  const [provinces, setProvinces] = useState([]);
+  const [districts, setDistricts] = useState([]);
+  const [wards, setWards] = useState([]);
+  const [locationLoading, setLocationLoading] = useState({
+    provinces: false,
+    districts: false,
+    wards: false,
+  });
+  const [shippingFee, setShippingFee] = useState(0);
+  const [shippingService, setShippingService] = useState(null);
+  const [shippingLoading, setShippingLoading] = useState(false);
+  const [shippingError, setShippingError] = useState("");
+  const shippingRequestRef = useRef(0);
 
   const [singleProduct, setSingleProduct] = useState(state?.product || null);
   const [items, setItems] = useState(state?.order?.orderDetails || []);
@@ -74,6 +110,12 @@ export default function Checkout() {
         name: user.fullName || "", // Mapping từ full_name
         phone: user.phoneNumber || "", // Mapping từ phone_number
         address: user.address || "", // Mapping từ address
+        provinceId: null,
+        provinceName: "",
+        districtId: null,
+        districtName: "",
+        wardCode: "",
+        wardName: "",
       };
 
       // Chỉ set nếu có ít nhất tên hoặc số điện thoại
@@ -83,6 +125,89 @@ export default function Checkout() {
       }
     }
   }, [user]);
+
+  useEffect(() => {
+    let active = true;
+    setLocationLoading((prev) => ({ ...prev, provinces: true }));
+
+    getProvinces()
+      .then((data) => {
+        if (active) setProvinces(data);
+      })
+      .catch((error) => {
+        console.error("[GHN] Load provinces failed:", error);
+        if (active) messageApi.warning("Không thể tải danh sách tỉnh/thành GHN");
+      })
+      .finally(() => {
+        if (active) {
+          setLocationLoading((prev) => ({ ...prev, provinces: false }));
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [messageApi]);
+
+  useEffect(() => {
+    let active = true;
+
+    if (!isModalOpen || !modalData.provinceId) {
+      setDistricts([]);
+      return () => {
+        active = false;
+      };
+    }
+
+    setLocationLoading((prev) => ({ ...prev, districts: true }));
+    getDistricts(modalData.provinceId)
+      .then((data) => {
+        if (active) setDistricts(data);
+      })
+      .catch((error) => {
+        console.error("[GHN] Load districts failed:", error);
+        if (active) messageApi.warning("Không thể tải danh sách quận/huyện GHN");
+      })
+      .finally(() => {
+        if (active) {
+          setLocationLoading((prev) => ({ ...prev, districts: false }));
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [isModalOpen, modalData.provinceId, messageApi]);
+
+  useEffect(() => {
+    let active = true;
+
+    if (!isModalOpen || !modalData.districtId) {
+      setWards([]);
+      return () => {
+        active = false;
+      };
+    }
+
+    setLocationLoading((prev) => ({ ...prev, wards: true }));
+    getWards(modalData.districtId)
+      .then((data) => {
+        if (active) setWards(data);
+      })
+      .catch((error) => {
+        console.error("[GHN] Load wards failed:", error);
+        if (active) messageApi.warning("Không thể tải danh sách phường/xã GHN");
+      })
+      .finally(() => {
+        if (active) {
+          setLocationLoading((prev) => ({ ...prev, wards: false }));
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [isModalOpen, modalData.districtId, messageApi]);
 
   useEffect(() => {
     if ((!state || !state.product) && !singleProduct) {
@@ -105,14 +230,17 @@ export default function Checkout() {
         setSelectedCouponId(cid || null);
       }
     }
-  }, []);
+  }, [state, singleProduct]);
 
-  const productsToPay = [
-    ...items,
-    ...(singleProduct
-      ? [{ ...singleProduct, quantity: state?.quantity || 1 }]
-      : []),
-  ];
+  const productsToPay = useMemo(
+    () => [
+      ...items,
+      ...(singleProduct
+        ? [{ ...singleProduct, quantity: state?.quantity || 1 }]
+        : []),
+    ],
+    [items, singleProduct, state?.quantity]
+  );
 
   const totalPrice = productsToPay.reduce(
     (sum, item) =>
@@ -122,20 +250,187 @@ export default function Checkout() {
   );
 
   const totalPriceWithCoupon = Math.max(totalPrice - couponValue, 0);
+  const selectedAddress = useMemo(
+    () => addresses.find((a) => a.id === selectedAddressId),
+    [addresses, selectedAddressId]
+  );
+  const totalQuantity = productsToPay.reduce(
+    (sum, item) => sum + Number(item.quantity || 0),
+    0
+  );
+  const packageWeight = Math.max(1000, totalQuantity * 1000);
+  const insuranceValue = Math.max(
+    0,
+    Math.min(Math.round(totalPriceWithCoupon), 5000000)
+  );
+  const grandTotal = totalPriceWithCoupon + shippingFee;
+  const isAddressReady = Boolean(
+    selectedAddress?.provinceId &&
+      selectedAddress?.districtId &&
+      selectedAddress?.wardCode
+  );
+
+  useEffect(() => {
+    if (!selectedAddress) {
+      setShippingFee(0);
+      setShippingService(null);
+      setShippingError("");
+      setShippingLoading(false);
+      return undefined;
+    }
+
+    if (!isAddressReady) {
+      setShippingFee(0);
+      setShippingService(null);
+      setShippingError("Vui lòng chọn đủ tỉnh/thành, quận/huyện, phường/xã để tính phí GHN.");
+      setShippingLoading(false);
+      return undefined;
+    }
+
+    const requestId = shippingRequestRef.current + 1;
+    shippingRequestRef.current = requestId;
+    const controller = new AbortController();
+    setShippingLoading(true);
+    setShippingError("");
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const services = await getAvailableServices(
+          selectedAddress.districtId,
+          controller.signal
+        );
+        const service =
+          services.find((item) => item.serviceId) || services[0] || null;
+
+        if (!service?.serviceId) {
+          throw new Error("GHN không có gói dịch vụ khả dụng cho tuyến này.");
+        }
+
+        const feeData = await calculateShippingFee(
+          {
+            toDistrictId: selectedAddress.districtId,
+            toWardCode: selectedAddress.wardCode,
+            serviceId: service.serviceId,
+            ...DEFAULT_PACKAGE_SIZE,
+            weight: packageWeight,
+            insuranceValue,
+          },
+          controller.signal
+        );
+
+        if (shippingRequestRef.current !== requestId) return;
+
+        const totalFee = Number(feeData?.totalFee || 0);
+        setShippingService(service);
+        setShippingFee(totalFee);
+        console.debug("[GHN] Fee calculated", {
+          serviceId: service.serviceId,
+          totalFee,
+          toDistrictId: selectedAddress.districtId,
+          toWardCode: selectedAddress.wardCode,
+        });
+      } catch (error) {
+        if (isGhnRequestCanceled(error)) return;
+        console.error("[GHN] Calculate fee failed:", error);
+        if (shippingRequestRef.current === requestId) {
+          setShippingFee(0);
+          setShippingService(null);
+          setShippingError(
+            `${extractGhnError(error)}. Tạm thời hệ thống giữ phí vận chuyển 0đ.`
+          );
+        }
+      } finally {
+        if (shippingRequestRef.current === requestId) {
+          setShippingLoading(false);
+        }
+      }
+    }, SHIPPING_DEBOUNCE_MS);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    selectedAddress,
+    isAddressReady,
+    packageWeight,
+    insuranceValue,
+    totalPriceWithCoupon,
+  ]);
 
   // Fetch Payment Methods
   useEffect(() => {
     api.get("/api/payment-methods")
       .then((res) => setPaymentMethods(res.data))
       .catch(() => messageApi.error("Không thể tải phương thức thanh toán"));
-  }, [token]);
+  }, [token, messageApi]);
 
   // Fetch Coupons
   useEffect(() => {
     api.get("/api/coupons/active")
       .then((res) => setCoupons(res.data))
       .catch(() => messageApi.error("Không thể tải danh sách voucher"));
-  }, []);
+  }, [messageApi]);
+
+  const getAddressDisplay = (addr) =>
+    [
+      addr?.address,
+      addr?.wardName,
+      addr?.districtName,
+      addr?.provinceName,
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+  const buildShippingAddress = (addr) =>
+    `${addr.name} - ${addr.phone} - ${getAddressDisplay(addr)}`;
+
+  const getSelectedName = (list, value, valueKey, labelKey) =>
+    list.find((item) => String(item[valueKey]) === String(value))?.[labelKey] ||
+    "";
+
+  const handleProvinceChange = (provinceId) => {
+    setModalData((prev) => ({
+      ...prev,
+      provinceId,
+      provinceName: getSelectedName(
+        provinces,
+        provinceId,
+        "provinceId",
+        "provinceName"
+      ),
+      districtId: null,
+      districtName: "",
+      wardCode: "",
+      wardName: "",
+    }));
+    setDistricts([]);
+    setWards([]);
+  };
+
+  const handleDistrictChange = (districtId) => {
+    setModalData((prev) => ({
+      ...prev,
+      districtId,
+      districtName: getSelectedName(
+        districts,
+        districtId,
+        "districtId",
+        "districtName"
+      ),
+      wardCode: "",
+      wardName: "",
+    }));
+    setWards([]);
+  };
+
+  const handleWardChange = (wardCode) => {
+    setModalData((prev) => ({
+      ...prev,
+      wardCode,
+      wardName: getSelectedName(wards, wardCode, "wardCode", "wardName"),
+    }));
+  };
 
   // --- LOGIC XỬ LÝ VOUCHER ---
   const handleSelectCoupon = (couponId) => {
@@ -216,19 +511,26 @@ export default function Checkout() {
   };
 
   const handleConfirmOrder = async () => {
-    const selectedAddress = addresses.find((a) => a.id === selectedAddressId);
     if (!selectedAddress)
       return messageApi.warning("Vui lòng chọn địa chỉ nhận hàng!");
+    if (!isAddressReady)
+      return messageApi.warning("Vui lòng chọn đủ tỉnh/thành, quận/huyện, phường/xã!");
+    if (shippingLoading)
+      return messageApi.warning("Đang tính phí vận chuyển, vui lòng chờ giây lát!");
     if (!paymentMethod)
       return messageApi.warning("Vui lòng chọn phương thức thanh toán!");
+    if (shippingError) {
+      messageApi.warning("GHN đang lỗi, hệ thống tạm giữ phí vận chuyển 0đ.");
+    }
 
     const orderPayload = {
       userId: Cookies.get("user_id"),
       paymentMethodId: paymentMethod,
-      shippingAddress: `${selectedAddress.name} - ${selectedAddress.phone} - ${selectedAddress.address}`,
+      shippingAddress: buildShippingAddress(selectedAddress),
       customerNote: note,
       couponId: selectedCouponId,
-      totalAmount: totalPriceWithCoupon,
+      totalAmount: grandTotal,
+      shippingFee: shippingFee,
       isOrder: true,
       orderStatus: "pending",
       orderDetails: productsToPay.map((item) => ({
@@ -247,7 +549,7 @@ export default function Checkout() {
     if (paymentMethod === "PM002") {
       try {
         const { data: vnpData } = await api.post("/api/vnpay/create-payment", {
-          amount: Math.round(totalPriceWithCoupon),
+          amount: Math.round(grandTotal),
           language: "vn",
         });
         if (vnpData.code === "00") {
@@ -273,7 +575,7 @@ export default function Checkout() {
         orderId: orderData.orderId,
         paymentMethodId: paymentMethod,
         transactionId: "COD-" + Date.now(),
-        amount: totalPriceWithCoupon,
+        amount: grandTotal,
         paymentStatus: "Pending",
       });
 
@@ -281,14 +583,26 @@ export default function Checkout() {
       sessionStorage.removeItem("pendingOrder");
       setTimeout(() => navigate("/purchase"), 1500);
     } catch (err) {
-      messageApi.error("Lỗi: " + (err.response?.data || err.message));
+      messageApi.error("Lỗi: " + (err.response?.data?.message || err.response?.data || err.message));
     }
   };
 
   // --- Address Modal Handlers ---
   const openAddModal = () => {
     setEditingAddress(null);
-    setModalData({ name: "", phone: "", address: "" });
+    setModalData({
+      name: "",
+      phone: "",
+      address: "",
+      provinceId: null,
+      provinceName: "",
+      districtId: null,
+      districtName: "",
+      wardCode: "",
+      wardName: "",
+    });
+    setDistricts([]);
+    setWards([]);
     setIsModalOpen(true);
   };
   const openEditModal = (addr) => {
@@ -297,32 +611,73 @@ export default function Checkout() {
       name: addr.name,
       phone: addr.phone,
       address: addr.address,
+      provinceId: addr.provinceId || null,
+      provinceName: addr.provinceName || "",
+      districtId: addr.districtId || null,
+      districtName: addr.districtName || "",
+      wardCode: addr.wardCode || "",
+      wardName: addr.wardName || "",
     });
     setIsModalOpen(true);
   };
   const handleSaveAddress = () => {
-    if (!modalData.name || !modalData.phone || !modalData.address)
+    if (
+      !modalData.name?.trim() ||
+      !modalData.phone?.trim() ||
+      !modalData.address?.trim() ||
+      !modalData.provinceId ||
+      !modalData.districtId ||
+      !modalData.wardCode
+    )
       return messageApi.warning("Vui lòng nhập đầy đủ thông tin!");
+
+    const compactPhone = modalData.phone.replace(/\D/g, "");
+    if (compactPhone.length < 9 || compactPhone.length > 11) {
+      return messageApi.warning("Số điện thoại nhận hàng không hợp lệ!");
+    }
+
+    const nextAddress = {
+      ...modalData,
+      name: modalData.name.trim(),
+      phone: modalData.phone.trim(),
+      address: modalData.address.trim(),
+      provinceId: Number(modalData.provinceId),
+      provinceName:
+        modalData.provinceName ||
+        getSelectedName(provinces, modalData.provinceId, "provinceId", "provinceName"),
+      districtId: Number(modalData.districtId),
+      districtName:
+        modalData.districtName ||
+        getSelectedName(districts, modalData.districtId, "districtId", "districtName"),
+      wardCode: String(modalData.wardCode),
+      wardName:
+        modalData.wardName ||
+        getSelectedName(wards, modalData.wardCode, "wardCode", "wardName"),
+    };
 
     if (editingAddress) {
       setAddresses((prev) =>
         prev.map((a) =>
-          a.id === editingAddress.id ? { ...a, ...modalData } : a
+          a.id === editingAddress.id ? { ...a, ...nextAddress } : a
         )
       );
     } else {
       const newId = addresses.length
         ? Math.max(...addresses.map((a) => a.id)) + 1
         : 1;
-      setAddresses((prev) => [...prev, { id: newId, ...modalData }]);
+      setAddresses((prev) => [...prev, { id: newId, ...nextAddress }]);
       setSelectedAddressId(newId);
     }
     setIsModalOpen(false);
   };
   const handleDeleteAddress = (id) => {
-    setAddresses((prev) => prev.filter((a) => a.id !== id));
-    if (selectedAddressId === id && addresses.length > 1)
-      setSelectedAddressId(addresses[0].id);
+    setAddresses((prev) => {
+      const nextAddresses = prev.filter((a) => a.id !== id);
+      if (selectedAddressId === id) {
+        setSelectedAddressId(nextAddresses[0]?.id || null);
+      }
+      return nextAddresses;
+    });
   };
 
   if (!productsToPay.length) {
@@ -414,8 +769,15 @@ export default function Checkout() {
                               </span>
                             </div>
                             <p className="text-gray-600 text-sm leading-relaxed">
-                              {addr.address}
+                              {getAddressDisplay(addr)}
                             </p>
+                            {(!addr.provinceId ||
+                              !addr.districtId ||
+                              !addr.wardCode) && (
+                              <p className="text-xs text-amber-600 mt-1">
+                                Chưa chọn mã tỉnh/quận/phường GHN
+                              </p>
+                            )}
                           </div>
                         </div>
 
@@ -616,21 +978,45 @@ export default function Checkout() {
                       <span>Giảm giá</span>
                       <span>-{couponValue.toLocaleString()} ₫</span>
                     </div>
+                    <div className="flex justify-between text-gray-600">
+                      <span className="flex items-center gap-1">
+                        <Truck className="w-4 h-4" /> Phí vận chuyển
+                      </span>
+                      <span>
+                        {shippingLoading
+                          ? "Đang tính..."
+                          : `${shippingFee.toLocaleString()} ₫`}
+                      </span>
+                    </div>
+                    {shippingService && !shippingLoading && (
+                      <p className="text-xs text-blue-600">
+                        GHN: {shippingService.shortName || "Dịch vụ khả dụng"}{" "}
+                        #{shippingService.serviceId}
+                      </p>
+                    )}
+                    {shippingError && (
+                      <p className="text-xs text-amber-600 leading-relaxed">
+                        {shippingError}
+                      </p>
+                    )}
                     <div className="flex justify-between items-center pt-3 border-t border-gray-100">
                       <span className="font-bold text-gray-900 text-base">
                         Tổng thanh toán
                       </span>
                       <span className="font-bold text-2xl text-red-600">
-                        {totalPriceWithCoupon.toLocaleString()} ₫
+                        {grandTotal.toLocaleString()} ₫
                       </span>
                     </div>
                   </div>
 
                   <button
                     onClick={handleConfirmOrder}
-                    className="w-full bg-red-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-red-700 active:scale-[0.98] transition shadow-md hover:shadow-lg flex items-center justify-center gap-2"
+                    disabled={shippingLoading}
+                    className={`w-full bg-red-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-red-700 active:scale-[0.98] transition shadow-md hover:shadow-lg flex items-center justify-center gap-2 ${
+                      shippingLoading ? "opacity-70 cursor-wait" : ""
+                    }`}
                   >
-                    <span>Đặt hàng</span>
+                    <span>{shippingLoading ? "Đang tính phí..." : "Đặt hàng"}</span>
                     <ChevronRight className="w-5 h-5 opacity-80" />
                   </button>
                 </div>
@@ -683,6 +1069,70 @@ export default function Checkout() {
               }
               prefix={<Phone className="w-4 h-4 text-gray-400" />}
             />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label className="text-sm font-medium text-gray-700 mb-1 block">
+                Tỉnh/Thành
+              </label>
+              <Select
+                size="large"
+                showSearch
+                allowClear
+                optionFilterProp="label"
+                placeholder="Chọn tỉnh"
+                value={modalData.provinceId || undefined}
+                loading={locationLoading.provinces}
+                onChange={handleProvinceChange}
+                className="w-full"
+                options={provinces.map((item) => ({
+                  value: item.provinceId,
+                  label: item.provinceName,
+                }))}
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-gray-700 mb-1 block">
+                Quận/Huyện
+              </label>
+              <Select
+                size="large"
+                showSearch
+                allowClear
+                optionFilterProp="label"
+                placeholder="Chọn quận"
+                value={modalData.districtId || undefined}
+                loading={locationLoading.districts}
+                disabled={!modalData.provinceId}
+                onChange={handleDistrictChange}
+                className="w-full"
+                options={districts.map((item) => ({
+                  value: item.districtId,
+                  label: item.districtName,
+                }))}
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-gray-700 mb-1 block">
+                Phường/Xã
+              </label>
+              <Select
+                size="large"
+                showSearch
+                allowClear
+                optionFilterProp="label"
+                placeholder="Chọn phường"
+                value={modalData.wardCode || undefined}
+                loading={locationLoading.wards}
+                disabled={!modalData.districtId}
+                onChange={handleWardChange}
+                className="w-full"
+                options={wards.map((item) => ({
+                  value: item.wardCode,
+                  label: item.wardName,
+                }))}
+              />
+            </div>
           </div>
           <div>
             <label className="text-sm font-medium text-gray-700 mb-1 block">

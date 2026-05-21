@@ -192,7 +192,7 @@ export default function OrderManager() {
     try {
       const res = await api.get("/api/orders");
       const data = res.data;      
-      setOrders(data.sort((a, b) => b.orderId.localeCompare(a.orderId)));
+      setOrders(data.sort((a, b) => new Date(b.orderDate) - new Date(a.orderDate)));
     } catch (err) {
       console.error("API Error:", err);
       messageApi.error("Không thể tải danh sách đơn hàng");
@@ -648,6 +648,14 @@ export default function OrderManager() {
                 </div>
               </div>
               <div className="text-right">
+                {detailOrder.shippingFee != null && (
+                  <div className="mb-1">
+                    <Text type="secondary" className="text-xs">Phí vận chuyển</Text>
+                    <div className="text-sm font-medium text-gray-700">
+                      {Number(detailOrder.shippingFee).toLocaleString()} ₫
+                    </div>
+                  </div>
+                )}
                 <Text type="secondary">Tổng thanh toán</Text>
                 <div className="text-2xl font-bold text-red-600">
                   {detailOrder.totalAmount.toLocaleString()} ₫
