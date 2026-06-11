@@ -19,6 +19,8 @@ import Home from "./pages/user/Home";
 import Login from "./pages/user/Login";
 import Register from "./pages/user/Register";
 import LoginSuccess from "./pages/user/LoginSuccess";
+import RoomPlanner from "./components/RoomPlanner";
+
 import EditProfile from "./pages/user/profile/EditProfile";
 import PromotionsPage from "./pages/PromotionsPage";
 import ContactPage from "./pages/ContactPage";
@@ -37,6 +39,7 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route path="/login/success" element={<LoginSuccess />} />
+        <Route path="/room-planner" element={<RoomPlanner />} />
 
         <Route element={<MainLayout />}>
           <Route path="/" element={<Home />} />
