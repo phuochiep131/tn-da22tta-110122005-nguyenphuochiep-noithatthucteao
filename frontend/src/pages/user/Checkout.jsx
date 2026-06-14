@@ -20,6 +20,7 @@ import {
 import Cookies from "js-cookie";
 import { AuthContext } from "../../context/AuthContext"; // [UPDATE] Import AuthContext
 import api from "../../config/api";
+import PayPalButton from "../../components/PayPalButton"; // [PAYPAL] Nút thanh toán PayPal tái sử dụng
 import {
   calculateShippingFee,
   extractGhnError,
@@ -528,6 +529,64 @@ export default function Checkout() {
     messageApi.success("Mã hợp lệ! Voucher đã được chọn.");
   };
 
+  // [PAYPAL] Gom logic dựng payload đơn hàng để cả luồng COD và PayPal dùng chung.
+  const buildOrderPayload = () => ({
+    userId: Cookies.get("user_id"),
+    paymentMethodId: paymentMethod,
+    shippingAddress: buildShippingAddress(selectedAddress),
+    customerNote: note,
+    couponId: selectedCouponId,
+    totalAmount: grandTotal,
+    shippingFee: shippingFee,
+    isOrder: true,
+    orderStatus: "pending",
+    orderDetails: productsToPay.map((item) => ({
+      product: { productId: item.product?.productId || item.productId },
+      quantity: item.quantity,
+      unitPrice: item.unitPrice || item.product?.price || item.price,
+      originalUnitPrice:
+        item.originalUnitPrice || item.product?.price || item.price,
+      // TRUYỀN FLAG ISFLASHSALE ĐỂ BACKEND TRỪ KHO FLASH SALE
+      isFlashSale: item.isFlashSale ? 1 : 0,
+    })),
+    oldOrderIds,
+  });
+
+  // [PAYPAL] Đơn hàng chỉ hợp lệ khi đã chọn địa chỉ đầy đủ và phí ship đã tính xong.
+  const isCheckoutReady = Boolean(
+    selectedAddress && isAddressReady && !shippingLoading
+  );
+
+  // [PAYPAL] Sau khi PayPal capture thành công -> tạo Order + Payment (status Completed),
+  // tái sử dụng đúng các API có sẵn như luồng VnPay/COD.
+  const handlePayPalSuccess = async (capture) => {
+    try {
+      const orderPayload = buildOrderPayload();
+      const apiPath = oldOrderIds?.length
+        ? "/api/orders/replace"
+        : "/api/orders";
+      const { data: orderData } = await api.post(apiPath, orderPayload);
+
+      await api.post("/api/payments", {
+        orderId: orderData.orderId,
+        paymentMethodId: "PM003",
+        transactionId: capture?.transactionId || "PAYPAL-" + Date.now(),
+        amount: grandTotal,
+        paymentStatus: "Completed",
+      });
+
+      messageApi.success("Thanh toán PayPal thành công!");
+      messageApi.success("Đặt hàng thành công!");
+      sessionStorage.removeItem("pendingOrder");
+      setTimeout(() => navigate("/purchase"), 1500);
+    } catch (err) {
+      messageApi.error(
+        "Lỗi lưu đơn hàng: " +
+          (err.response?.data?.message || err.response?.data || err.message)
+      );
+    }
+  };
+
   const handleConfirmOrder = async () => {
     if (!selectedAddress)
       return messageApi.warning("Vui lòng chọn địa chỉ nhận hàng!");
@@ -541,27 +600,7 @@ export default function Checkout() {
       messageApi.warning("GHN đang lỗi, hệ thống tạm giữ phí vận chuyển 0đ.");
     }
 
-    const orderPayload = {
-      userId: Cookies.get("user_id"),
-      paymentMethodId: paymentMethod,
-      shippingAddress: buildShippingAddress(selectedAddress),
-      customerNote: note,
-      couponId: selectedCouponId,
-      totalAmount: grandTotal,
-      shippingFee: shippingFee,
-      isOrder: true,
-      orderStatus: "pending",
-      orderDetails: productsToPay.map((item) => ({
-        product: { productId: item.product?.productId || item.productId },
-        quantity: item.quantity,
-        unitPrice: item.unitPrice || item.product?.price || item.price,
-        originalUnitPrice:
-          item.originalUnitPrice || item.product?.price || item.price,
-        // TRUYỀN FLAG ISFLASHSALE ĐỂ BACKEND TRỪ KHO FLASH SALE
-        isFlashSale: item.isFlashSale ? 1 : 0,
-      })),
-      oldOrderIds,
-    };
+    const orderPayload = buildOrderPayload();
 
     // LUỒNG THANH TOÁN VNPAY (PM002)
     if (paymentMethod === "PM002") {
@@ -911,10 +950,12 @@ export default function Checkout() {
                       <span className="text-xs text-gray-500">
                         {pm.id === "PM002"
                           ? "Thanh toán qua ví điện tử/ngân hàng"
+                          : pm.id === "PM003"
+                          ? "Thanh toán quốc tế qua PayPal"
                           : "Thanh toán khi nhận hàng"}
                       </span>
                     </div>
-                    {pm.id === "PM002" ? (
+                    {pm.id === "PM002" || pm.id === "PM003" ? (
                       <CreditCard className="w-6 h-6 text-blue-500" />
                     ) : (
                       <Truck className="w-6 h-6 text-green-500" />
@@ -1034,16 +1075,39 @@ export default function Checkout() {
                     </div>
                   </div>
 
-                  <button
-                    onClick={handleConfirmOrder}
-                    disabled={shippingLoading}
-                    className={`w-full bg-red-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-red-700 active:scale-[0.98] transition shadow-md hover:shadow-lg flex items-center justify-center gap-2 ${
-                      shippingLoading ? "opacity-70 cursor-wait" : ""
-                    }`}
-                  >
-                    <span>{shippingLoading ? "Đang tính phí..." : "Đặt hàng"}</span>
-                    <ChevronRight className="w-5 h-5 opacity-80" />
-                  </button>
+                  {paymentMethod === "PM003" ? (
+                    // [PAYPAL] Hiển thị Smart Buttons thay cho nút "Đặt hàng" khi chọn PayPal.
+                    <div className="space-y-2">
+                      {!isCheckoutReady && (
+                        <p className="text-xs text-amber-600 text-center">
+                          Vui lòng chọn địa chỉ đầy đủ và chờ tính phí vận chuyển
+                          trước khi thanh toán.
+                        </p>
+                      )}
+                      <PayPalButton
+                        amountVnd={Math.round(grandTotal)}
+                        disabled={!isCheckoutReady}
+                        onSuccess={handlePayPalSuccess}
+                        onError={(err) =>
+                          messageApi.error(
+                            "Thanh toán PayPal thất bại: " +
+                              (err?.message || "Vui lòng thử lại.")
+                          )
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <button
+                      onClick={handleConfirmOrder}
+                      disabled={shippingLoading}
+                      className={`w-full bg-red-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-red-700 active:scale-[0.98] transition shadow-md hover:shadow-lg flex items-center justify-center gap-2 ${
+                        shippingLoading ? "opacity-70 cursor-wait" : ""
+                      }`}
+                    >
+                      <span>{shippingLoading ? "Đang tính phí..." : "Đặt hàng"}</span>
+                      <ChevronRight className="w-5 h-5 opacity-80" />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

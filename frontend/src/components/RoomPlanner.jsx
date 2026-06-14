@@ -133,28 +133,101 @@ function Room({ width, length, height }) {
   );
 }
 
-/* ─────────────────── MODEL (non-selected) ─────────────────── */
+/* ─────────────────── SPATIAL HELPERS (Box3 / AABB math) ───────────────────
+ *
+ *  All objects are GROUNDED in useGroundedModel(): the inner clone is offset so
+ *  that its footprint is centred on the wrapper origin in X/Z and its BOTTOM
+ *  sits at the wrapper origin (local y = 0). Therefore:
+ *    - item.position is the floor contact point. Keeping position.y = 0 means
+ *      the object always rests exactly on the floor (Feature 1).
+ *    - The unrotated half-extents (hx, hz) and full height live in dimsMapRef.
+ *
+ *  computeAABB() rebuilds the world-space Box3 for any (position, rotation,
+ *  scale) WITHOUT touching the scene graph, by projecting the oriented box
+ *  half-extents onto the world axes. This makes a rotated 2m wardrobe report a
+ *  correctly-rotated footprint (Feature 3) and is cheap enough to run every
+ *  drag frame.
+ */
 
-function Model({ item, onSelect }) {
+const _euler = new THREE.Euler();
+const _mat = new THREE.Matrix4();
+
+function computeAABB(position, rotation, scale, dims) {
+  if (!dims) return null;
+
+  _euler.set(rotation[0] || 0, rotation[1] || 0, rotation[2] || 0);
+  _mat.makeRotationFromEuler(_euler);
+  const e = _mat.elements; // column-major
+
+  // Scaled local half-extents. dims.height is the FULL height, so half of it.
+  const hx = dims.hx * Math.abs(scale[0]);
+  const hy = (dims.height / 2) * Math.abs(scale[1]);
+  const hz = dims.hz * Math.abs(scale[2]);
+
+  // World half-extents = |R| · localHalfExtents (projection of the OBB).
+  const ex = Math.abs(e[0]) * hx + Math.abs(e[4]) * hy + Math.abs(e[8]) * hz;
+  const ey = Math.abs(e[1]) * hx + Math.abs(e[5]) * hy + Math.abs(e[9]) * hz;
+  const ez = Math.abs(e[2]) * hx + Math.abs(e[6]) * hy + Math.abs(e[10]) * hz;
+
+  // The geometric centre is hy above the (grounded) origin in local space.
+  // Rotate that offset so tilted objects are still handled correctly.
+  const cx = position[0] + e[4] * hy;
+  const cy = position[1] + e[5] * hy;
+  const cz = position[2] + e[6] * hy;
+
+  return new THREE.Box3(
+    new THREE.Vector3(cx - ex, cy - ey, cz - ez),
+    new THREE.Vector3(cx + ex, cy + ey, cz + ez)
+  );
+}
+
+// AABB overlap test with a small epsilon so objects may sit flush against each
+// other (touching faces) without registering as a collision.
+function boxesIntersect(a, b, eps = 0.012) {
+  return (
+    a.min.x < b.max.x - eps && a.max.x > b.min.x + eps &&
+    a.min.y < b.max.y - eps && a.max.y > b.min.y + eps &&
+    a.min.z < b.max.z - eps && a.max.z > b.min.z + eps
+  );
+}
+
+/* ─────────────────── GROUNDED MODEL HOOK ───────────────────
+ *
+ *  Loads the GLB, normalises it to its DB dimensions, GROUNDS it (bottom on
+ *  floor, footprint centred), clones materials so highlight tinting can't bleed
+ *  into other instances sharing the cached GLTF, and records the resulting
+ *  half-extents into dimsMapRef for the spatial constraints.
+ */
+function useGroundedModel(item, dimsMapRef) {
   const { scene } = useGLTF(item.modelUrl);
 
-  const cloned = useMemo(() => {
+  return useMemo(() => {
     const c = scene.clone(true);
-    // Reset scale temporarily to calculate natural bounding box
+
+    // Unique materials per instance (clone shares geometry+material refs by
+    // default) — required so the red collision tint only affects this object.
+    c.traverse((o) => {
+      if (o.isMesh && o.material) {
+        o.material = Array.isArray(o.material)
+          ? o.material.map((m) => m.clone())
+          : o.material.clone();
+      }
+    });
+
+    // Natural bounding box at scale 1.
     c.scale.set(1, 1, 1);
     c.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(c);
+    let box = new THREE.Box3().setFromObject(c);
     const size = new THREE.Vector3();
     box.getSize(size);
 
-    // DB width, height, length are in cm, convert to meters
+    // DB width, height, length are in cm → meters.
     const targetWidth = (item.width || 80) / 100;
     const targetHeight = (item.height || 75) / 100;
     const targetLength = (item.length || 120) / 100;
 
-    // Compute uniform scale factor to prevent model warping/distortion.
-    // Y-axis is vertical height in Three.js. If height is too small (e.g. flat rug),
-    // we use the average of the horizontal dimensions.
+    // Uniform scale to avoid warping. Prefer matching height; fall back to the
+    // horizontal average for flat items (rugs, mats).
     let scale = 1;
     if (size.y > 0.15 && targetHeight > 0.15) {
       scale = targetHeight / size.y;
@@ -164,18 +237,35 @@ function Model({ item, onSelect }) {
       scale = (scaleX + scaleZ) / 2;
     }
 
-    // Apply uniform scale to the scene, then wrap in a Group.
-    // This way React's scale prop or TransformControls only
-    // touches the wrapper — the inner baseScale is preserved.
     c.scale.set(scale, scale, scale);
+    c.updateMatrixWorld(true);
+
+    // Recompute the SCALED box, then ground: centre X/Z, drop bottom to y = 0.
+    box = new THREE.Box3().setFromObject(c);
+    const center = box.getCenter(new THREE.Vector3());
+    const gsize = box.getSize(new THREE.Vector3());
+    c.position.x -= center.x;
+    c.position.z -= center.z;
+    c.position.y -= box.min.y;
+
     const wrapper = new THREE.Group();
     wrapper.add(c);
-    return wrapper;
-  }, [scene, item.width, item.height, item.length]);
+
+    const dims = { hx: gsize.x / 2, hz: gsize.z / 2, height: gsize.y };
+    if (dimsMapRef) dimsMapRef.current[item.id] = dims;
+
+    return { object: wrapper, dims };
+  }, [scene, item.id, item.width, item.height, item.length, dimsMapRef]);
+}
+
+/* ─────────────────── MODEL (non-selected) ─────────────────── */
+
+function Model({ item, onSelect, dimsMapRef }) {
+  const { object } = useGroundedModel(item, dimsMapRef);
 
   return (
     <primitive
-      object={cloned}
+      object={object}
       position={item.position}
       rotation={item.rotation}
       scale={item.scale}
@@ -219,65 +309,126 @@ function copyTransform(source) {
   };
 }
 
-function readObjectTransform(object) {
-  return {
-    position: object.position.toArray(),
-    rotation: [object.rotation.x, object.rotation.y, object.rotation.z],
-    scale: object.scale.toArray(),
-  };
-}
-
-function TransformWrapper({ item, mode, onSelect, onUpdate, liveTransformMapRef, orbitControlsRef }) {
+function TransformWrapper({
+  item,
+  mode,
+  onSelect,
+  onUpdate,
+  liveTransformMapRef,
+  orbitControlsRef,
+  dimsMapRef,
+  otherObjects,
+  roomWidth,
+  roomLength,
+}) {
   const transformRef = useRef();
-  const { scene } = useGLTF(item.modelUrl);
-  const cloned = useMemo(() => {
-    const c = scene.clone(true);
-    // Reset scale temporarily to calculate natural bounding box
-    c.scale.set(1, 1, 1);
-    c.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(c);
-    const size = new THREE.Vector3();
-    box.getSize(size);
-
-    // DB width, height, length are in cm, convert to meters
-    const targetWidth = (item.width || 80) / 100;
-    const targetHeight = (item.height || 75) / 100;
-    const targetLength = (item.length || 120) / 100;
-
-    // Compute uniform scale factor to prevent model warping/distortion.
-    // Y-axis is vertical height in Three.js. If height is too small (e.g. flat rug),
-    // we use the average of the horizontal dimensions.
-    let scale = 1;
-    if (size.y > 0.15 && targetHeight > 0.15) {
-      scale = targetHeight / size.y;
-    } else {
-      const scaleX = targetWidth / (size.x || 1);
-      const scaleZ = targetLength / (size.z || 1);
-      scale = (scaleX + scaleZ) / 2;
-    }
-
-    // Apply uniform scale to the scene, then wrap in a Group.
-    // TransformControls operates on its own parent group,
-    // so the inner baseScale is never overwritten.
-    c.scale.set(scale, scale, scale);
-    const wrapper = new THREE.Group();
-    wrapper.add(c);
-    return wrapper;
-  }, [scene, item.width, item.height, item.length]);
+  const { object: cloned, dims } = useGroundedModel(item, dimsMapRef);
 
   // Always up-to-date transform — written to on every objectChange frame.
   const liveTransform = useRef(copyTransform(item));
+  // Last position that was BOTH inside the room AND collision-free. We revert
+  // here if the drag is released on an invalid spot.
+  const lastValidRef = useRef(copyTransform(item));
+  // AABBs of every OTHER object, snapshotted at drag start (they don't move
+  // while we drag this one).
+  const otherBoxesRef = useRef([]);
+  // Keep the latest otherObjects list reachable inside event handlers without
+  // re-binding listeners mid-drag.
+  const otherObjectsRef = useRef(otherObjects);
+  otherObjectsRef.current = otherObjects;
 
+  /* ── Collision highlight (red emissive), applied imperatively so we don't
+        re-render the React tree every drag frame. ── */
+  const materialsRef = useRef([]);
+  const invalidRef = useRef(false);
+
+  useEffect(() => {
+    const mats = [];
+    cloned.traverse((o) => {
+      if (!o.isMesh) return;
+      const list = Array.isArray(o.material) ? o.material : [o.material];
+      list.forEach((m) => {
+        if (m && m.emissive) {
+          mats.push({ mat: m, emissive: m.emissive.clone(), intensity: m.emissiveIntensity ?? 1 });
+        }
+      });
+    });
+    materialsRef.current = mats;
+    return () => {
+      // Restore originals if this instance unmounts mid-highlight.
+      mats.forEach(({ mat, emissive, intensity }) => {
+        mat.emissive.copy(emissive);
+        mat.emissiveIntensity = intensity;
+      });
+    };
+  }, [cloned]);
+
+  const setInvalid = useCallback((on) => {
+    if (invalidRef.current === on) return;
+    invalidRef.current = on;
+    materialsRef.current.forEach(({ mat, emissive, intensity }) => {
+      if (on) {
+        mat.emissive.setRGB(0.65, 0.04, 0.04);
+        mat.emissiveIntensity = 0.55;
+      } else {
+        mat.emissive.copy(emissive);
+        mat.emissiveIntensity = intensity;
+      }
+    });
+  }, []);
+
+  /* ── Runs on every drag frame: clamp to the room walls, test collisions,
+        highlight + remember the last valid pose. ── */
   const syncLiveTransform = useCallback(() => {
     const object = transformRef.current?.object;
-    const nextTransform = object
-      ? readObjectTransform(object)
-      : liveTransform.current;
+    if (!object) return liveTransform.current;
 
+    const myDims = dimsMapRef.current[item.id] || dims;
+    const rotation = [object.rotation.x, object.rotation.y, object.rotation.z];
+    const scale = object.scale.toArray();
+    let position = object.position.toArray();
+
+    // FEATURE 2 — Room boundary. Build the world AABB and shove it back inside
+    // the walls (floor is centred on the origin: x∈[-W/2,W/2], z∈[-L/2,L/2]).
+    let box = computeAABB(position, rotation, scale, myDims);
+    if (box) {
+      const halfW = roomWidth / 2;
+      const halfL = roomLength / 2;
+      let dx = 0;
+      let dz = 0;
+      if (box.min.x < -halfW) dx = -halfW - box.min.x;
+      else if (box.max.x > halfW) dx = halfW - box.max.x;
+      if (box.min.z < -halfL) dz = -halfL - box.min.z;
+      else if (box.max.z > halfL) dz = halfL - box.max.z;
+
+      if (dx !== 0 || dz !== 0) {
+        object.position.x += dx;
+        object.position.z += dz;
+        position = object.position.toArray();
+        box = computeAABB(position, rotation, scale, myDims);
+      }
+    }
+
+    // FEATURE 3 — Collision. Test the clamped AABB against the snapshot of all
+    // other objects. We don't hard-block the gizmo (that fights TransformControls
+    // and feels janky); instead we tint red and revert on release.
+    let collides = false;
+    if (box) {
+      for (const other of otherBoxesRef.current) {
+        if (boxesIntersect(box, other)) {
+          collides = true;
+          break;
+        }
+      }
+    }
+    setInvalid(collides);
+
+    const nextTransform = { position, rotation, scale };
     liveTransform.current = nextTransform;
     liveTransformMapRef.current[item.id] = nextTransform;
+    if (!collides) lastValidRef.current = nextTransform;
     return nextTransform;
-  }, [item.id, liveTransformMapRef]);
+  }, [item.id, dims, dimsMapRef, liveTransformMapRef, roomWidth, roomLength, setInvalid]);
 
   // Seed parent map immediately so toggleLock can read even before any drag.
   useEffect(() => {
@@ -287,10 +438,11 @@ function TransformWrapper({ item, mode, onSelect, onUpdate, liveTransformMapRef,
       scale: [...item.scale],
     };
     liveTransform.current = nextTransform;
+    lastValidRef.current = nextTransform;
     liveTransformMapRef.current[item.id] = nextTransform;
   }, [item.id, item.position, item.rotation, item.scale, liveTransformMapRef]);
 
-  // Listen for objectChange (every frame during drag) and dragging-changed.
+  // Listen for dragging-changed (drag start / end).
   useEffect(() => {
     const controls = transformRef.current;
     if (!controls) return;
@@ -301,9 +453,30 @@ function TransformWrapper({ item, mode, onSelect, onUpdate, liveTransformMapRef,
         orbitControlsRef.current.enabled = !e.value;
       }
 
-      if (!e.value) {
-        // Drag ended — persist to React state
-        onUpdate(item.id, syncLiveTransform());
+      if (e.value) {
+        // Drag START — snapshot every other object's AABB once.
+        otherBoxesRef.current = otherObjectsRef.current
+          .map((o) => computeAABB(o.position, o.rotation, o.scale, dimsMapRef.current[o.id]))
+          .filter(Boolean);
+        lastValidRef.current = liveTransform.current;
+      } else {
+        // Drag END — if we're sitting on an invalid (overlapping) spot, snap
+        // back to the last valid pose; otherwise commit.
+        if (invalidRef.current) {
+          const lv = lastValidRef.current;
+          const object = transformRef.current?.object;
+          if (object) {
+            object.position.set(lv.position[0], lv.position[1], lv.position[2]);
+            object.rotation.set(lv.rotation[0], lv.rotation[1], lv.rotation[2]);
+            object.scale.set(lv.scale[0], lv.scale[1], lv.scale[2]);
+          }
+          liveTransform.current = lv;
+          liveTransformMapRef.current[item.id] = lv;
+          setInvalid(false);
+          onUpdate(item.id, lv);
+        } else {
+          onUpdate(item.id, syncLiveTransform());
+        }
       }
     };
 
@@ -314,7 +487,7 @@ function TransformWrapper({ item, mode, onSelect, onUpdate, liveTransformMapRef,
       }
       controls.removeEventListener("dragging-changed", handleDraggingChanged);
     };
-  }, [item.id, onUpdate, orbitControlsRef, syncLiveTransform]);
+  }, [item.id, onUpdate, orbitControlsRef, dimsMapRef, liveTransformMapRef, syncLiveTransform, setInvalid]);
 
   return (
     <TransformControls
@@ -443,6 +616,10 @@ export default function RoomPlanner() {
   //   so that toggleLock can read the latest Three.js transform at any time.
   const liveTransformMapRef = useRef({});
 
+  // ★ Footprint dimensions per object { hx, hz, height } in meters, written by
+  //   useGroundedModel once each GLB has loaded. Used for boundary + collision.
+  const dimsMapRef = useRef({});
+
   const updateObject = useCallback((id, transform) => {
     setObjects((prev) =>
       prev.map((obj) => (obj.id === id ? { ...obj, ...transform } : obj))
@@ -450,14 +627,19 @@ export default function RoomPlanner() {
   }, []);
 
   const addProduct = (product) => {
-    const offset = objects.length * 0.8;
+    // Stagger new items in a small grid AROUND the room centre (the floor is
+    // centred on the origin). y stays 0 — useGroundedModel rests the object's
+    // bottom exactly on the floor. Drag constraints handle the rest.
+    const i = objects.length;
+    const gx = ((i % 3) - 1) * 0.8;
+    const gz = (((Math.floor(i / 3)) % 3) - 1) * 0.8;
     setObjects((prev) => [
       ...prev,
       {
         id: Date.now(),
         name: product.name,
         modelUrl: product.modelUrl,
-        position: [offset % Math.max(width - 1, 1), 0, offset % Math.max(length - 1, 1)],
+        position: [gx, 0, gz],
         rotation: [0, 0, 0],
         scale: [1, 1, 1],
         locked: false,
@@ -498,6 +680,7 @@ export default function RoomPlanner() {
   const deleteSelected = () => {
     if (!selectedObject) return;
     delete liveTransformMapRef.current[selectedObject];
+    delete dimsMapRef.current[selectedObject];
     setObjects((prev) => prev.filter((x) => x.id !== selectedObject));
     setSelectedObject(null);
   };
@@ -873,9 +1056,18 @@ export default function RoomPlanner() {
                   onUpdate={updateObject}
                   liveTransformMapRef={liveTransformMapRef}
                   orbitControlsRef={controlsRef}
+                  dimsMapRef={dimsMapRef}
+                  otherObjects={objects.filter((o) => o.id !== item.id)}
+                  roomWidth={width}
+                  roomLength={length}
                 />
               ) : (
-                <Model key={item.id} item={item} onSelect={setSelectedObject} />
+                <Model
+                  key={item.id}
+                  item={item}
+                  onSelect={setSelectedObject}
+                  dimsMapRef={dimsMapRef}
+                />
               )
             )}
           </Suspense>

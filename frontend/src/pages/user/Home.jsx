@@ -5,20 +5,16 @@ import PersonalizedRecommendations from "../../components/PersonalizedRecommenda
 export default function Home() {
   return (
     <div className="animate-in fade-in duration-500">
-      {/* Slideshow Banner */}
-      <section className="mb-8">
-        <Slideshow />
-      </section>
+      {/* Slideshow Banner — full width, không bọc section có padding/margin */}
+      <Slideshow />
 
       {/* Gợi ý sản phẩm cá nhân hóa */}
       <PersonalizedRecommendations />
 
       {/* Danh sách sản phẩm */}
-      {/* Component Products tự quản lý việc hiển thị sản phẩm, phân trang và bộ lọc riêng của nó */}
       <section>
         <Products />
       </section>
     </div>
   );
 }
-

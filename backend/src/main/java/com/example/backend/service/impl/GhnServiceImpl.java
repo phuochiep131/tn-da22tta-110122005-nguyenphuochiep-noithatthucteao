@@ -16,6 +16,7 @@ import com.example.backend.repository.ProductRepository;
 import com.example.backend.service.GhnService;
 import com.example.backend.util.ShippingCalculator;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpEntity;
@@ -25,6 +26,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
@@ -48,6 +50,7 @@ public class GhnServiceImpl implements GhnService {
     private final RestTemplate restTemplate;
     private final GhnProperties properties;
     private final ProductRepository productRepository;
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final ConcurrentMap<String, CacheEntry<?>> locationCache = new ConcurrentHashMap<>();
 
     public GhnServiceImpl(
@@ -345,11 +348,39 @@ public class GhnServiceImpl implements GhnService {
                 }
 
                 return root.path("data");
+            } catch (HttpStatusCodeException ex) {
+                // GHN trả lỗi nghiệp vụ (4xx/5xx) KÈM message thật trong body.
+                // RestTemplate ném exception trước khi đọc body, nên ta tự bóc message ở đây
+                // thay vì báo "Cannot connect" gây hiểu lầm.
+                String ghnMessage = extractGhnErrorMessage(ex.getResponseBodyAsString());
+                log.warn("GHN {} business error: httpStatus={}, message={}",
+                        operation, ex.getStatusCode().value(), ghnMessage);
+                throw new GhnApiException(ghnMessage);
             } catch (RestClientException ex) {
+                // Đây mới thực sự là lỗi kết nối (timeout, DNS, mất mạng...).
                 log.warn("GHN {} transport error: {}", operation, ex.getMessage());
                 throw new GhnApiException("Cannot connect to GHN API", ex);
             }
         });
+    }
+
+    /**
+     * Bóc field "message" trong body lỗi của GHN; nếu không parse được thì trả message gốc.
+     */
+    private String extractGhnErrorMessage(String responseBody) {
+        if (!StringUtils.hasText(responseBody)) {
+            return "GHN request failed";
+        }
+        try {
+            JsonNode node = objectMapper.readTree(responseBody);
+            String message = node.path("message").asText(null);
+            if (StringUtils.hasText(message)) {
+                return message;
+            }
+        } catch (Exception ignored) {
+            // body không phải JSON hợp lệ -> dùng nguyên văn bên dưới
+        }
+        return responseBody;
     }
 
     private <T> T withRetry(String operation, Supplier<T> supplier) {
