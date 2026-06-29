@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import '@google/model-viewer';
 
 /**
@@ -9,24 +9,17 @@ import '@google/model-viewer';
  *   arModelGltf  – URL file .glb (web/Android AR)
  *   arModelUsdz  – URL file .usdz (iOS AR Quick Look)
  *   productName  – tên sản phẩm (alt text)
- *   length       – chiều dài thực (cm) – từ DB
- *   width        – chiều rộng thực (cm) – từ DB
- *   height       – chiều cao thực (cm) – từ DB
  *
  * Fix chính:
  *  1. Chỉ dùng 1 <model-viewer> duy nhất (trước đó dùng 2, gây lag).
- *  2. Dùng ar-scale="fixed" để model hiển thị đúng kích thước thực tế.
- *  3. Tự động scale model dựa trên dimensions từ database.
- *  4. Thêm loading="lazy", poster placeholder, reveal="auto" → giảm lag.
+ *  2. Dùng ar-scale="auto" → người dùng tự do thay đổi kích thước model trong AR.
+ *  3. Thêm loading="lazy", poster placeholder, reveal="auto" → giảm lag.
  */
 const ProductARViewer = ({
   images = [],
   arModelGltf,
   arModelUsdz,
   productName,
-  length: prodLength,
-  width: prodWidth,
-  height: prodHeight,
 }) => {
   const [activeImage, setActiveImage] = useState(images?.[0] || 'https://via.placeholder.com/500');
   const modelViewerRef = useRef(null);
@@ -34,62 +27,6 @@ const ProductARViewer = ({
   useEffect(() => {
     setActiveImage(images?.[0] || 'https://via.placeholder.com/500');
   }, [images?.[0]]);
-
-  /**
-   * Khi model-viewer load xong model, tính toán tỉ lệ scale để model khớp
-   * kích thước thực từ database (length × width × height, đơn vị cm → m).
-   *
-   * model-viewer sử dụng hệ đơn vị mét trong AR mode.
-   * Bounding box gốc của model có thể khác kích thước thực ⇒ cần scale.
-   */
-  const handleModelLoad = useCallback(() => {
-    const mv = modelViewerRef.current;
-    if (!mv) return;
-
-    // Nếu không có dimension từ DB → giữ nguyên scale gốc
-    if (!prodLength && !prodWidth && !prodHeight) return;
-
-    try {
-      // Lấy bounding box hiện tại của model (đơn vị mét trong model-viewer)
-      const dim = mv.getDimensions();
-      if (!dim) return;
-
-      const modelW = dim.x; // width  (trục X)
-      const modelH = dim.y; // height (trục Y)
-      const modelD = dim.z; // depth  (trục Z)
-
-      // Kích thước thực từ DB (cm → m)
-      const realW = prodWidth ? prodWidth / 100 : null;
-      const realH = prodHeight ? prodHeight / 100 : null;
-      const realD = prodLength ? prodLength / 100 : null;
-
-      // Tính scale ratio cho mỗi trục có dữ liệu
-      const ratios = [];
-      if (realW && modelW > 0.0001) ratios.push(realW / modelW);
-      if (realH && modelH > 0.0001) ratios.push(realH / modelH);
-      if (realD && modelD > 0.0001) ratios.push(realD / modelD);
-
-      if (ratios.length === 0) return;
-
-      // Dùng scale đồng nhất (uniform) để không méo model
-      // Lấy trung bình của các ratio, hoặc lấy ratio theo trục lớn nhất
-      const scale = ratios.reduce((a, b) => a + b, 0) / ratios.length;
-
-      // Áp dụng scale
-      mv.scale = `${scale} ${scale} ${scale}`;
-    } catch (err) {
-      console.warn('[ProductARViewer] Error computing model scale:', err);
-    }
-  }, [prodLength, prodWidth, prodHeight]);
-
-  // Gắn listener khi model-viewer sẵn sàng
-  useEffect(() => {
-    const mv = modelViewerRef.current;
-    if (!mv) return;
-
-    mv.addEventListener('load', handleModelLoad);
-    return () => mv.removeEventListener('load', handleModelLoad);
-  }, [handleModelLoad]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -129,7 +66,7 @@ const ProductARViewer = ({
               ios-src={arModelUsdz}
               ar
               ar-modes="webxr scene-viewer quick-look"
-              ar-scale="fixed"
+              ar-scale="auto"
               ar-placement="floor"
               camera-controls
               auto-rotate
